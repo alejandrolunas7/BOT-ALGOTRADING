@@ -1,0 +1,399 @@
+//@version=5
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║          NASDAQ MOMENTUM PULLBACK  –  PineScript v5 para TradingView    ║
+// ║                                                                          ║
+// ║  Conversión fiel del EA MQL5 "NasdaqMomentumPullback.mq5".              ║
+// ║  Timeframe recomendado: M15  |  Símbolo: NQ1!, US100, NASDAQ100CFD...   ║
+// ║                                                                          ║
+// ║  LÓGICA GENERAL (evaluada al cierre de cada vela):                      ║
+// ║   - Filtro de tendencia .......: EMA 200 (precio vs media)              ║
+// ║   - Filtro de pullback ........: MACD principal negativa (LONG)          ║
+// ║                                  positiva (SHORT)                        ║
+// ║   - Gatillo ...................: cruce MACD línea/señal en la vela       ║
+// ║                                  cerrada anterior                        ║
+// ║   - SL ........................: 1.5 × ATR(14)                          ║
+// ║   - TP ........................: 3.0 × ATR(14)                          ║
+// ║   - Breakeven .................: al alcanzar +1 R                        ║
+// ║   - Trailing Stop .............: desde +1.5 R, distancia = ATR          ║
+// ║   - Invalidación técnica ......: cruce contrario del MACD               ║
+// ║   - Cierre forzado diario .....: sin exposición nocturna                ║
+// ║   - Kill Switch ...............: pérdida diaria máxima (3 %)            ║
+// ║   - Máx. operaciones/día ......: 4                                       ║
+// ║                                                                          ║
+// ║  NOTAS DE CONVERSIÓN:                                                    ║
+// ║   • El tamaño de posición se calcula como:                               ║
+// ║       qty = (equity × riesgo%) / (distancia_SL × valor_del_punto)       ║
+// ║     Ajusta "Valor del punto" según tu broker (NQ futures = 20 $/punto). ║
+// ║   • El horario usa la hora del exchange del símbolo en TradingView,      ║
+// ║     no la hora del servidor del broker. Ajusta los inputs según          ║
+// ║     corresponda (por defecto: sesión NY 17:00–23:00 UTC+2/+3).          ║
+// ║   • El Kill Switch compara equity total (incluye no realizado).          ║
+// ║     El EA en MT5 usa solo P&L realizado; la diferencia es menor.        ║
+// ║   • El filtro de spread no está disponible de forma nativa en Pine.      ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+strategy(
+    title                  = "Nasdaq Momentum Pullback [NQ-MomPullback]",
+    shorttitle             = "NQ-MomPullback",
+    overlay                = true,
+    calc_on_every_tick     = false,
+    process_orders_on_close = false,
+    default_qty_type       = strategy.fixed,
+    default_qty_value      = 1,
+    initial_capital        = 100000,
+    pyramiding             = 0,
+    commission_type        = strategy.commission.cash_per_contract,
+    commission_value       = 5.0,
+    slippage               = 2
+)
+
+// ══════════════════════════════════════════════════════════════
+//  1. INPUTS
+// ══════════════════════════════════════════════════════════════
+
+g1 = "━━━ INDICADORES ━━━"
+i_emaPeriod    = input.int  (200,   "Periodo EMA",                          group=g1, minval=10)
+i_macdFast     = input.int  (12,    "MACD EMA Rapida",                      group=g1, minval=2)
+i_macdSlow     = input.int  (26,    "MACD EMA Lenta",                       group=g1, minval=3)
+i_macdSig      = input.int  (9,     "MACD Senal",                           group=g1, minval=1)
+i_atrPeriod    = input.int  (14,    "Periodo ATR",                          group=g1, minval=1)
+i_emaSlopeBars = input.int  (0,     "Filtro pendiente EMA (barras, 0=off)", group=g1, minval=0)
+
+g2 = "━━━ INVALIDACION TECNICA ━━━"
+i_invalidMode  = input.int  (0,     "Cruce MACD contrario: 0=siempre cierra | 1=solo si pierde | 2=nunca",
+                              group=g2, minval=0, maxval=2)
+
+g3 = "━━━ GESTION DE RIESGO ━━━"
+i_riskPct      = input.float(1.0,   "Riesgo por operacion (%)",             group=g3, minval=0.1, maxval=10.0, step=0.1)
+i_slMult       = input.float(1.5,   "Stop Loss (ATR x)",                    group=g3, minval=0.1, step=0.1)
+i_tpMult       = input.float(3.0,   "Take Profit (ATR x)",                  group=g3, minval=0.1, step=0.1)
+i_maxLossDay   = input.float(3.0,   "Kill Switch – perdida diaria max (%)", group=g3, minval=0.1, step=0.1)
+i_maxOpsDay    = input.int  (4,     "Max. operaciones por dia",             group=g3, minval=1)
+i_atrMinPrice  = input.float(50.0,  "ATR minimo en precio (0 = off)",       group=g3, minval=0.0, step=1.0,
+                              tooltip="En unidades de precio del grafico. Ej: NQ en puntos de indice (ATR tipico M15 = 30-150).")
+i_atrMaxPrice  = input.float(0.0,   "ATR maximo en precio (0 = off)",       group=g3, minval=0.0, step=1.0)
+i_pointValue   = input.float(20.0,  "Valor del punto ($/punto — NQ = 20)", group=g3, minval=0.01,
+                              tooltip="Dolares por punto de indice. NQ futures = 20. US100 CFD varia segun broker.")
+
+g4 = "━━━ BREAKEVEN Y TRAILING ━━━"
+i_useBreakeven = input.bool (true,  "Activar Breakeven",                    group=g4)
+i_beR          = input.float(1.0,   "Activar BE al alcanzar +X R",          group=g4, minval=0.1, step=0.1)
+i_useTrailing  = input.bool (true,  "Activar Trailing Stop",                group=g4)
+i_trailR       = input.float(1.5,   "Activar Trailing al alcanzar +X R",   group=g4, minval=0.1, step=0.1)
+i_trailMult    = input.float(1.0,   "Distancia Trailing (ATR x)",           group=g4, minval=0.1, step=0.1)
+
+g5 = "━━━ HORARIO (hora del exchange) ━━━"
+i_sessH1       = input.int  (17,    "Hora inicio sesion",  group=g5, minval=0, maxval=23)
+i_sessM1       = input.int  (0,     "Minuto inicio",       group=g5, minval=0, maxval=59)
+i_sessH2       = input.int  (23,    "Hora fin sesion",     group=g5, minval=0, maxval=23)
+i_sessM2       = input.int  (0,     "Minuto fin",          group=g5, minval=0, maxval=59)
+i_closeH       = input.int  (23,    "Hora cierre forzado", group=g5, minval=0, maxval=23)
+i_closeM       = input.int  (45,    "Minuto cierre forzado", group=g5, minval=0, maxval=59)
+i_noEntryMins  = input.int  (45,    "Bloquear entradas X min antes del cierre forzado", group=g5, minval=0)
+
+// ══════════════════════════════════════════════════════════════
+//  2. INDICADORES
+// ══════════════════════════════════════════════════════════════
+
+ema200                          = ta.ema(close, i_emaPeriod)
+[macdMain, macdSigLine, _hist]  = ta.macd(close, i_macdFast, i_macdSlow, i_macdSig)
+atr                             = ta.atr(i_atrPeriod)
+
+// ══════════════════════════════════════════════════════════════
+//  3. FILTROS DE TIEMPO
+// ══════════════════════════════════════════════════════════════
+
+barMinutes    = hour * 60 + minute
+sessStartMins = i_sessH1 * 60 + i_sessM1
+sessEndMins   = i_sessH2 * 60 + i_sessM2
+closeMins     = i_closeH * 60 + i_closeM
+noEntryAfter  = closeMins - i_noEntryMins
+
+isWeekend   = dayofweek == dayofweek.saturday or dayofweek == dayofweek.sunday
+isForceClose = not isWeekend and barMinutes >= closeMins
+
+isInSession  = not isWeekend
+             and barMinutes >= sessStartMins
+             and barMinutes <  sessEndMins
+             and barMinutes <  noEntryAfter
+
+// ══════════════════════════════════════════════════════════════
+//  4. CONTADORES DIARIOS Y KILL SWITCH
+// ══════════════════════════════════════════════════════════════
+
+var int   v_dOps       = 0
+var float v_dayEq      = na
+var bool  v_killSwitch = false
+
+isNewDay = ta.change(time("D")) != 0 or bar_index == 0
+
+if isNewDay
+    v_dOps       := 0
+    v_dayEq      := strategy.equity
+    v_killSwitch := false
+
+// Kill Switch: equity cayó más del límite respecto al inicio del día
+if not na(v_dayEq) and strategy.equity < v_dayEq * (1.0 - i_maxLossDay / 100.0)
+    v_killSwitch := true
+
+// ══════════════════════════════════════════════════════════════
+//  5. FILTRO DE VOLATILIDAD (ATR)
+// ══════════════════════════════════════════════════════════════
+
+atrMinOK = i_atrMinPrice <= 0.0 or atr >= i_atrMinPrice
+atrMaxOK = i_atrMaxPrice <= 0.0 or atr <= i_atrMaxPrice
+
+// ══════════════════════════════════════════════════════════════
+//  6. CONDICIONES DE SEÑAL
+// ══════════════════════════════════════════════════════════════
+
+// Filtro de pendiente de la EMA (evita rangos laterales volátiles)
+emaUpSlope   = i_emaSlopeBars <= 0 or ema200 > ema200[i_emaSlopeBars]
+emaDownSlope = i_emaSlopeBars <= 0 or ema200 < ema200[i_emaSlopeBars]
+
+// ── LONG ──
+// 1. Tendencia: cierre por encima de la EMA 200 (con pendiente si activa)
+// 2. Pullback: MACD principal en territorio negativo
+// 3. Gatillo: cruce alcista de la línea principal sobre la señal
+longTrend    = close > ema200 and emaUpSlope
+longPullback = macdMain < 0.0
+longCross    = macdMain[1] <= macdSigLine[1] and macdMain > macdSigLine
+buySignal    = longTrend and longPullback and longCross
+
+// ── SHORT ──
+// 1. Tendencia: cierre por debajo de la EMA 200 (con pendiente si activa)
+// 2. Pullback: MACD principal en territorio positivo
+// 3. Gatillo: cruce bajista de la línea principal bajo la señal
+shortTrend    = close < ema200 and emaDownSlope
+shortPullback = macdMain > 0.0
+shortCross    = macdMain[1] >= macdSigLine[1] and macdMain < macdSigLine
+sellSignal    = shortTrend and shortPullback and shortCross
+
+// ══════════════════════════════════════════════════════════════
+//  7. INVALIDACIÓN TÉCNICA
+//     Cierre a mercado si el MACD cruza en contra de la posición
+// ══════════════════════════════════════════════════════════════
+
+posSize = strategy.position_size
+inLong  = posSize > 0
+inShort = posSize < 0
+
+bearCross = macdMain[1] >= macdSigLine[1] and macdMain < macdSigLine
+bullCross = macdMain[1] <= macdSigLine[1] and macdMain > macdSigLine
+
+// Modo 0: cierra siempre | Modo 1: solo si la posición está en pérdida | Modo 2: nunca
+invalidateLong  = i_invalidMode != 2 and inLong  and bearCross
+                  and (i_invalidMode == 0 or strategy.openprofit < 0)
+invalidateShort = i_invalidMode != 2 and inShort and bullCross
+                  and (i_invalidMode == 0 or strategy.openprofit < 0)
+
+// ══════════════════════════════════════════════════════════════
+//  8. ESTADO INTERNO DE LA POSICIÓN (Breakeven / Trailing)
+// ══════════════════════════════════════════════════════════════
+
+var float v_entryPx   = na   // Precio real de apertura (post-fill)
+var float v_initRisk  = na   // 1R en precio = ATR_señal × SL_mult
+var float v_currentSL = na   // SL dinámico (se actualiza con BE/trail)
+var float v_initTP    = na   // TP inicial (precio absoluto, no se mueve)
+var bool  v_isLong    = na
+
+justEntered = posSize != 0 and posSize[1] == 0
+justExited  = posSize == 0 and posSize[1] != 0
+
+if justEntered
+    // La orden de entrada se envió en la vela anterior (bar[1]);
+    // aquí ya conocemos el precio real de llenado.
+    v_entryPx   := strategy.position_avg_price
+    v_isLong    := posSize > 0
+    // ATR de la vela de señal (bar[1] respecto a la vela actual de llenado)
+    entryAtr     = atr[1]
+    v_initRisk  := entryAtr * i_slMult
+    v_currentSL := v_isLong ? v_entryPx - v_initRisk : v_entryPx + v_initRisk
+    v_initTP    := v_isLong ? v_entryPx + entryAtr * i_tpMult
+                             : v_entryPx - entryAtr * i_tpMult
+    // Ajustar la orden de salida con los precios reales de apertura
+    if v_isLong
+        strategy.exit("Exit Long",  "Long",  stop=v_currentSL, limit=v_initTP, comment="SL/TP")
+    else
+        strategy.exit("Exit Short", "Short", stop=v_currentSL, limit=v_initTP, comment="SL/TP")
+
+if justExited
+    v_entryPx   := na
+    v_initRisk  := na
+    v_currentSL := na
+    v_initTP    := na
+    v_isLong    := na
+
+// ══════════════════════════════════════════════════════════════
+//  9. GESTIÓN DE BREAKEVEN Y TRAILING STOP
+//     Se recalcula en cada cierre de vela (equivalente al tick-a-tick
+//     del EA original, pero con resolución de barra en Pine).
+// ══════════════════════════════════════════════════════════════
+
+if posSize != 0 and not na(v_entryPx) and not na(v_initRisk)
+    profitPts = v_isLong ? (close - v_entryPx) : (v_entryPx - close)
+    profitR   = profitPts / v_initRisk    // Múltiplos de riesgo actuales
+    newSL     = v_currentSL
+
+    // ── Trailing Stop (prioritario sobre el BE) ──
+    // Distancia del trailing usa el ATR de la vela ACTUAL (dinámico, igual que MT5)
+    if i_useTrailing and profitR >= i_trailR
+        trailDist  = atr * i_trailMult
+        proposedSL = v_isLong ? close - trailDist : close + trailDist
+        if v_isLong and proposedSL > newSL
+            newSL := proposedSL
+        else if not v_isLong and (na(newSL) or proposedSL < newSL)
+            newSL := proposedSL
+
+    // ── Breakeven (solo si el trailing aún no ha actuado) ──
+    else if i_useBreakeven and profitR >= i_beR
+        if v_isLong and newSL < v_entryPx
+            newSL := v_entryPx
+        else if not v_isLong and (na(newSL) or newSL > v_entryPx)
+            newSL := v_entryPx
+
+    // Enviar modificación solo si el SL mejoró
+    if not na(newSL) and newSL != v_currentSL
+        v_currentSL := newSL
+        if v_isLong
+            strategy.exit("Exit Long",  "Long",  stop=v_currentSL, limit=v_initTP, comment="BE/Trail")
+        else
+            strategy.exit("Exit Short", "Short", stop=v_currentSL, limit=v_initTP, comment="BE/Trail")
+
+// ══════════════════════════════════════════════════════════════
+//  10. CÁLCULO DE CANTIDAD (tamaño de posición por % de riesgo)
+//      qty = (equity × riesgo%) / (distancia_SL_puntos × valor_por_punto)
+// ══════════════════════════════════════════════════════════════
+
+f_qty(slDist) =>
+    dollarRisk = strategy.equity * i_riskPct / 100.0
+    qty        = dollarRisk / (slDist * i_pointValue)
+    math.max(1.0, math.floor(qty))
+
+// ══════════════════════════════════════════════════════════════
+//  11. CONDICIÓN GLOBAL DE ENTRADA
+// ══════════════════════════════════════════════════════════════
+
+canEnter = not v_killSwitch
+         and isInSession
+         and atrMinOK
+         and atrMaxOK
+         and v_dOps < i_maxOpsDay
+         and posSize == 0
+
+// ══════════════════════════════════════════════════════════════
+//  12. EJECUCIÓN DE ÓRDENES
+// ══════════════════════════════════════════════════════════════
+
+// ── Cierre forzado diario ──
+if isForceClose and posSize != 0
+    strategy.close_all(comment="Cierre Forzado Diario")
+
+// ── Invalidación técnica ──
+if invalidateLong
+    strategy.close("Long",  comment="Invalidacion: cruce bajista MACD")
+if invalidateShort
+    strategy.close("Short", comment="Invalidacion: cruce alcista MACD")
+
+// ── Apertura LONG ──
+// La orden se envía al cierre de la vela de señal y se llena en la
+// apertura de la siguiente vela (process_orders_on_close = false).
+if canEnter and buySignal
+    slDist  = atr * i_slMult
+    tpDist  = atr * i_tpMult
+    slPrice = close - slDist
+    tpPrice = close + tpDist
+    qty     = f_qty(slDist)
+    strategy.entry("Long",  strategy.long,  qty=qty, comment="COMPRA")
+    strategy.exit ("Exit Long",  "Long",  stop=slPrice, limit=tpPrice, comment="SL/TP")
+    v_dOps := v_dOps + 1
+
+// ── Apertura SHORT ──
+if canEnter and sellSignal
+    slDist  = atr * i_slMult
+    tpDist  = atr * i_tpMult
+    slPrice = close + slDist
+    tpPrice = close - tpDist
+    qty     = f_qty(slDist)
+    strategy.entry("Short", strategy.short, qty=qty, comment="VENTA")
+    strategy.exit ("Exit Short", "Short", stop=slPrice, limit=tpPrice, comment="SL/TP")
+    v_dOps := v_dOps + 1
+
+// ══════════════════════════════════════════════════════════════
+//  13. VISUALIZACIÓN
+// ══════════════════════════════════════════════════════════════
+
+// EMA 200 (filtro de tendencia)
+plot(ema200, title="EMA 200", color=color.new(color.orange, 0), linewidth=2)
+
+// SL dinámico y TP mientras hay posición abierta
+plot((inLong or inShort) ? v_currentSL : na,
+     title="SL Dinamico", color=color.new(color.red,   20),
+     style=plot.style_linebr, linewidth=1)
+plot((inLong or inShort) ? v_initTP    : na,
+     title="Take Profit",  color=color.new(color.green, 20),
+     style=plot.style_linebr, linewidth=1)
+
+// Señales de entrada (solo las que pasan todos los filtros)
+plotshape(canEnter and buySignal,
+     title="Signal LONG",  style=shape.triangleup,
+     location=location.belowbar, color=color.new(color.lime, 0), size=size.small,
+     text="L")
+plotshape(canEnter and sellSignal,
+     title="Signal SHORT", style=shape.triangledown,
+     location=location.abovebar, color=color.new(color.red,  0), size=size.small,
+     text="S")
+
+// Señales descartadas (fuera de sesión / kill switch / filtros)
+plotshape((buySignal  and not canEnter),
+     title="Signal LONG (filtrado)",  style=shape.triangleup,
+     location=location.belowbar, color=color.new(color.lime, 70), size=size.tiny)
+plotshape((sellSignal and not canEnter),
+     title="Signal SHORT (filtrado)", style=shape.triangledown,
+     location=location.abovebar, color=color.new(color.red,  70), size=size.tiny)
+
+// Fondo: ventana de entradas activa (azul claro) y Kill Switch (rojo)
+bgcolor(isInSession and not v_killSwitch ? color.new(color.blue, 93) : na,
+     title="Sesion Activa")
+bgcolor(v_killSwitch                     ? color.new(color.red,  88) : na,
+     title="Kill Switch Activo")
+
+// ══════════════════════════════════════════════════════════════
+//  14. TABLA DE ESTADO (esquina superior derecha)
+// ══════════════════════════════════════════════════════════════
+
+var table tbl = table.new(
+     position.top_right, 2, 8,
+     bgcolor       = color.new(color.black, 75),
+     border_width  = 1,
+     border_color  = color.new(color.gray, 60))
+
+f_cell(col, row, label, value, valColor) =>
+    table.cell(tbl, col, row, label, text_color=color.silver, text_size=size.small, bgcolor=color.new(color.black, 75))
+    table.cell(tbl, col+1, row, value, text_color=valColor,  text_size=size.small, bgcolor=color.new(color.black, 75))
+
+if barstate.islast
+    // Estado actual
+    estado     = v_killSwitch    ? "KILL SWITCH ACTIVO" :
+                 isForceClose    ? "CIERRE FORZADO"      :
+                 not isInSession ? "FUERA DE SESION"     :
+                 inLong          ? "LONG ABIERTO"        :
+                 inShort         ? "SHORT ABIERTO"       : "BUSCANDO SENAL"
+    estColor   = v_killSwitch ? color.red : inLong ? color.lime : inShort ? color.red : color.white
+
+    f_cell(0, 0, "ESTADO",       estado,                                     estColor)
+    f_cell(0, 1, "ATR(" + str.tostring(i_atrPeriod) + ")",
+                                  str.tostring(atr,              "#.##"),     color.yellow)
+    f_cell(0, 2, "Ops hoy",       str.tostring(v_dOps) + " / " + str.tostring(i_maxOpsDay), color.white)
+    f_cell(0, 3, "Equity",        str.tostring(strategy.equity,  "#.##"),     color.lime)
+
+    plColor = strategy.openprofit >= 0 ? color.lime : color.red
+    f_cell(0, 4, "P/L abierto",   str.tostring(strategy.openprofit, "#.##"), plColor)
+
+    nlColor = strategy.netprofit >= 0 ? color.lime : color.red
+    f_cell(0, 5, "P/L neto",      str.tostring(strategy.netprofit,  "#.##"), nlColor)
+
+    slTxt = (inLong or inShort) and not na(v_currentSL) ? str.tostring(v_currentSL, "#.##") : "---"
+    tpTxt = (inLong or inShort) and not na(v_initTP)    ? str.tostring(v_initTP,    "#.##") : "---"
+    f_cell(0, 6, "SL actual",     slTxt,                                     color.red)
+    f_cell(0, 7, "TP objetivo",   tpTxt,                                     color.green)
