@@ -74,6 +74,7 @@ input int      InpHoraFin            = 23;         // Hora de fin de entradas (s
 input int      InpMinutoFin          = 0;          // Minuto de fin de entradas
 input int      InpHoraCierreForzado  = 23;         // Hora del cierre forzado diario (servidor)
 input int      InpMinutoCierreForzado= 45;         // Minuto del cierre forzado diario
+input int      InpMinutosSinEntradas = 45;         // Bloquear entradas X minutos antes del cierre forzado
 
 input group "=== 6. FILTROS DE SEGURIDAD ==="
 input int      InpSpreadMaximo       = 200;        // Spread máximo permitido (en puntos)
@@ -203,6 +204,13 @@ void OnTick()
    //--- 1. Panel de estado (se refresca en cada tick, coste despreciable)
    if(InpMostrarPanel)
       ActualizarPanel(tick);
+
+   //--- 1b. RED DE SEGURIDAD: si una posición sobrevivió a un día anterior
+   //    (ej. el mercado cerró antes de la hora del cierre forzado y no hubo
+   //    ticks para ejecutarlo), la cerramos en el PRIMER tick disponible.
+   //    Garantiza el principio de "cero exposición nocturna" incluso en
+   //    símbolos con sesión corta (acciones, índices con pausas).
+   CerrarPosicionesDeDiasAnteriores();
 
    //--- 2. Gestión de la posición abierta (Breakeven y Trailing).
    //    Se ejecuta TICK A TICK porque proteger beneficios no admite esperas,
@@ -705,6 +713,31 @@ void CerrarTodasLasPosiciones(string motivo)
   }
 
 //+------------------------------------------------------------------+
+//| Cierra las posiciones abiertas en un día ANTERIOR al actual.     |
+//| Caso real detectado en backtest: entrada a las 22:45, mercado de |
+//| acciones cerrado a las 23:00 => el cierre forzado de las 23:45   |
+//| nunca se ejecutó (sin ticks no hay OnTick) y la posición pasó la |
+//| noche abierta. Esta función la liquida al primer tick del día.   |
+//+------------------------------------------------------------------+
+void CerrarPosicionesDeDiasAnteriores()
+  {
+   datetime inicio_hoy = InicioDelDia();
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         continue;
+
+      datetime hora_apertura = (datetime)PositionGetInteger(POSITION_TIME);
+      if(hora_apertura < inicio_hoy)
+         CerrarPosicion(ticket, "Cierre forzado retroactivo: posición heredada de un día anterior");
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| ¿Estamos en (o pasada) la hora del cierre forzado diario?        |
 //+------------------------------------------------------------------+
 bool EsHoraDeCierreForzado()
@@ -733,6 +766,14 @@ bool EsHorarioOperativo()
    int minuto_actual = ahora.hour * 60 + ahora.min;
    int minuto_inicio = InpHoraInicio * 60 + InpMinutoInicio;
    int minuto_fin    = InpHoraFin * 60 + InpMinutoFin;
+
+   //--- Bloqueo previo al cierre forzado: no abrimos operaciones nuevas en los
+   //    últimos X minutos de la sesión. Evita posiciones que nacen tan tarde
+   //    que el mercado cierra antes de poder ejecutar el cierre forzado
+   //    (sin ticks no hay OnTick => la posición quedaría abierta toda la noche).
+   int minuto_cierre = InpHoraCierreForzado * 60 + InpMinutoCierreForzado;
+   if(minuto_actual >= minuto_cierre - InpMinutosSinEntradas)
+      return(false);
 
    return(minuto_actual >= minuto_inicio && minuto_actual <= minuto_fin);
   }

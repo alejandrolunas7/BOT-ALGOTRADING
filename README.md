@@ -42,6 +42,8 @@ Los valores por defecto del EA asumen **broker GMT+3 con horario de verano europ
 | Fin de entradas | 22:00 | **23:00** |
 | Cierre forzado diario | 22:45 | **23:45** |
 
+Además, `InpMinutosSinEntradas` (default 45) bloquea las entradas nuevas en los últimos X minutos antes del cierre forzado, y el EA liquida al primer tick del día cualquier posición heredada de un día anterior — red de seguridad para símbolos cuya sesión termina antes de la hora del cierre forzado (sin ticks, el cierre programado no puede ejecutarse).
+
 **Comprueba el GMT offset de tu broker** (la hora del panel del EA muestra la hora del servidor) y ajusta los inputs de horario si difiere. Recuerda también que EE.UU. y Europa cambian al horario de verano en fechas distintas (≈2 semanas en marzo y 1 en octubre/noviembre): revisa los horarios en esos periodos.
 
 ---
@@ -75,6 +77,8 @@ Todos los parámetros son `input` y por tanto **optimizables en el Strategy Test
 - **Distancia mínima de stops** (`SYMBOL_TRADE_STOPS_LEVEL`) respetada tanto al abrir como al modificar el SL.
 
 ## 6. Backtesting recomendado
+
+> ⚠️ **Usa el símbolo correcto.** El índice Nasdaq 100 se llama `US100`, `USTEC` o `NAS100` según el broker. `NDAQ` es la **acción de Nasdaq, Inc.** (~70–80 USD), no el índice. La cuenta MetaQuotes-Demo **no ofrece el índice** ni historial de ticks profundo ("Calidad del historial: n/a" en el informe = resultados no fiables): usa la demo de un broker real (IC Markets, Pepperstone, etc.).
 
 1. Strategy Tester → modo **"Cada tick basado en ticks reales"** para resultados fiables con trailing/BE.
 2. Periodo mínimo recomendado: 2–3 años de NAS100 en M15.
