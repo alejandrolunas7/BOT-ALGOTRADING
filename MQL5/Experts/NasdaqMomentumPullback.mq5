@@ -57,6 +57,8 @@ input double   InpMultiplicadorSL    = 1.5;        // SL = ATR x este multiplica
 input double   InpMultiplicadorTP    = 3.0;        // TP = ATR x este multiplicador (1:2)
 input double   InpPerdidaDiariaMax   = 3.0;        // Kill Switch: pérdida diaria máxima (% del balance)
 input int      InpMaxOperacionesDia  = 4;          // Máximo de operaciones por día
+input int      InpATRMinimoPuntos    = 500;        // ATR mínimo en puntos para operar (filtro de mercado muerto)
+input double   InpLoteMaximo         = 5.0;        // Lote máximo absoluto (techo de seguridad)
 
 input group "=== 4. BREAKEVEN Y TRAILING STOP ==="
 input bool     InpUsarBreakeven      = true;       // Activar Breakeven
@@ -75,6 +77,7 @@ input int      InpMinutoFin          = 0;          // Minuto de fin de entradas
 input int      InpHoraCierreForzado  = 23;         // Hora del cierre forzado diario (servidor)
 input int      InpMinutoCierreForzado= 45;         // Minuto del cierre forzado diario
 input int      InpMinutosSinEntradas = 45;         // Bloquear entradas X minutos antes del cierre forzado
+input int      InpMargenFinSesion    = 15;         // Cerrar X minutos antes del fin de sesión del símbolo
 
 input group "=== 6. FILTROS DE SEGURIDAD ==="
 input int      InpSpreadMaximo       = 200;        // Spread máximo permitido (en puntos)
@@ -259,6 +262,19 @@ void OnTick()
      {
       Print("Entrada descartada: spread actual (", DoubleToString(spread_puntos, 0),
             " pts) > máximo permitido (", InpSpreadMaximo, " pts).");
+      return;
+     }
+
+   //--- 10b. Filtro de VOLATILIDAD MÍNIMA. Lección del backtest: en sesiones
+   //    muertas (festivos, medias sesiones como Acción de Gracias) el ATR se
+   //    desploma => el SL queda ridículamente cerca => el lotaje dinámico
+   //    calcula un lote gigantesco para "arriesgar el 1%". Un gap posterior
+   //    se salta ese SL minúsculo y la pérdida real se multiplica. Si el
+   //    mercado no se mueve, NO se opera.
+   if(g_atr_actual < InpATRMinimoPuntos * _Point)
+     {
+      Print("Entrada descartada: ATR actual (", DoubleToString(g_atr_actual / _Point, 0),
+            " pts) < mínimo exigido (", InpATRMinimoPuntos, " pts). Mercado sin volatilidad.");
       return;
      }
 
@@ -502,6 +518,17 @@ double CalcularLote(double sl_puntos)
    if(lote > lote_max)
       lote = lote_max;
 
+   //--- 5. TECHO ABSOLUTO de lote (backstop de seguridad). Aunque el filtro
+   //    de ATR mínimo ya evita los lotes desproporcionados, este límite
+   //    garantiza que NINGÚN escenario (error de datos del broker, ATR
+   //    corrupto...) produzca una posición capaz de quemar la cuenta.
+   if(lote > InpLoteMaximo)
+     {
+      PrintFormat("AVISO: lote calculado (%.2f) supera el techo de seguridad (%.2f). Se recorta al techo.",
+                  lote, InpLoteMaximo);
+      lote = InpLoteMaximo;
+     }
+
    return(NormalizeDouble(lote, 2));
   }
 
@@ -738,6 +765,47 @@ void CerrarPosicionesDeDiasAnteriores()
   }
 
 //+------------------------------------------------------------------+
+//| Minuto del día en que TERMINA la última sesión de trading de hoy |
+//| según el calendario del broker. Devuelve -1 si no hay sesión.    |
+//+------------------------------------------------------------------+
+int MinutoFinSesionHoy()
+  {
+   MqlDateTime ahora;
+   TimeToStruct(TimeCurrent(), ahora);
+
+   datetime desde, hasta;
+   int fin = -1;
+   //--- Recorremos todas las sesiones de trading del día de la semana actual
+   //    y nos quedamos con la que termina más tarde.
+   for(uint i = 0; SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)ahora.day_of_week, i, desde, hasta); i++)
+     {
+      //--- 'hasta' es un offset desde las 00:00 (86400 = medianoche del día siguiente)
+      int minuto_fin = (hasta >= 86400) ? 24 * 60 : (int)(hasta / 60);
+      if(minuto_fin > fin)
+         fin = minuto_fin;
+     }
+   return(fin);
+  }
+
+//+------------------------------------------------------------------+
+//| Minuto EFECTIVO del cierre forzado: el menor entre la hora       |
+//| configurada y el fin de la sesión del símbolo menos un margen.   |
+//| LECCIÓN DEL BACKTEST: si el cierre forzado se programa a una     |
+//| hora en la que el mercado YA no cotiza (cierre normal o festivo),|
+//| no llegan ticks, OnTick no se dispara y la posición pasa la      |
+//| noche/fin de semana abierta. Anclarlo al calendario del broker   |
+//| garantiza que cerramos mientras todavía hay mercado.             |
+//+------------------------------------------------------------------+
+int MinutoCierreEfectivo()
+  {
+   int minuto_cierre = InpHoraCierreForzado * 60 + InpMinutoCierreForzado;
+   int fin_sesion    = MinutoFinSesionHoy();
+   if(fin_sesion > 0 && fin_sesion - InpMargenFinSesion < minuto_cierre)
+      minuto_cierre = fin_sesion - InpMargenFinSesion;
+   return(minuto_cierre);
+  }
+
+//+------------------------------------------------------------------+
 //| ¿Estamos en (o pasada) la hora del cierre forzado diario?        |
 //+------------------------------------------------------------------+
 bool EsHoraDeCierreForzado()
@@ -746,9 +814,8 @@ bool EsHoraDeCierreForzado()
    TimeToStruct(TimeCurrent(), ahora);   // TimeCurrent() = hora del SERVIDOR del broker
 
    int minuto_actual = ahora.hour * 60 + ahora.min;
-   int minuto_cierre = InpHoraCierreForzado * 60 + InpMinutoCierreForzado;
 
-   return(minuto_actual >= minuto_cierre);
+   return(minuto_actual >= MinutoCierreEfectivo());
   }
 
 //+------------------------------------------------------------------+
@@ -771,8 +838,8 @@ bool EsHorarioOperativo()
    //    últimos X minutos de la sesión. Evita posiciones que nacen tan tarde
    //    que el mercado cierra antes de poder ejecutar el cierre forzado
    //    (sin ticks no hay OnTick => la posición quedaría abierta toda la noche).
-   int minuto_cierre = InpHoraCierreForzado * 60 + InpMinutoCierreForzado;
-   if(minuto_actual >= minuto_cierre - InpMinutosSinEntradas)
+   //    Se usa el cierre EFECTIVO (acotado por el fin de sesión del símbolo).
+   if(minuto_actual >= MinutoCierreEfectivo() - InpMinutosSinEntradas)
       return(false);
 
    return(minuto_actual >= minuto_inicio && minuto_actual <= minuto_fin);

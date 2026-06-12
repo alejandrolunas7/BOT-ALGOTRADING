@@ -44,6 +44,12 @@ Los valores por defecto del EA asumen **broker GMT+3 con horario de verano europ
 
 Además, `InpMinutosSinEntradas` (default 45) bloquea las entradas nuevas en los últimos X minutos antes del cierre forzado, y el EA liquida al primer tick del día cualquier posición heredada de un día anterior — red de seguridad para símbolos cuya sesión termina antes de la hora del cierre forzado (sin ticks, el cierre programado no puede ejecutarse).
 
+**Protecciones contra gaps y sesiones anómalas** (lecciones de backtest sobre USTEC):
+
+- El cierre forzado se **ancla al calendario de sesiones del broker** (`SymbolInfoSessionTrade`): si la sesión del símbolo termina antes de la hora configurada, el EA cierra `InpMargenFinSesion` minutos (default 15) antes del fin de sesión real, mientras todavía hay ticks.
+- `InpATRMinimoPuntos` (default 500): si el ATR cae por debajo (festivos, medias sesiones tipo Acción de Gracias), **no se opera**. Evita que un SL minúsculo produzca un lote gigantesco que un gap posterior convierta en pérdida catastrófica.
+- `InpLoteMaximo` (default 5.0): techo absoluto de lote como última barrera. Ajústalo a tu tamaño de cuenta.
+
 **Comprueba el GMT offset de tu broker** (la hora del panel del EA muestra la hora del servidor) y ajusta los inputs de horario si difiere. Recuerda también que EE.UU. y Europa cambian al horario de verano en fechas distintas (≈2 semanas en marzo y 1 en octubre/noviembre): revisa los horarios en esos periodos.
 
 ---
