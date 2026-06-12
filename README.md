@@ -50,6 +50,12 @@ Además, `InpMinutosSinEntradas` (default 45) bloquea las entradas nuevas en los
 - `InpATRMinimoPuntos` (default 500): si el ATR cae por debajo (festivos, medias sesiones tipo Acción de Gracias), **no se opera**. Evita que un SL minúsculo produzca un lote gigantesco que un gap posterior convierta en pérdida catastrófica.
 - `InpLoteMaximo` (default 5.0): techo absoluto de lote como última barrera. Ajústalo a tu tamaño de cuenta.
 
+**Filtros de régimen de mercado** (añadidos tras el análisis del backtest 2023–2026, donde la estrategia ganaba en 2023–24 y se degradaba en el régimen lateral-volátil de 2025):
+
+- `InpPendienteEMABarras` (default 20, 0 = off): exige que la EMA 200 esté subiendo (largos) o bajando (cortos) respecto a hace N velas. Evita las señales falsas cuando el precio cruza una EMA plana en mercado en rango.
+- `InpModoInvalidacion` (default 1): el cruce contrario del MACD cierra la posición **solo si está en pérdida**. Con el modo antiguo (0 = cerrar siempre) los cruces amputaban las operaciones ganadoras antes de llegar al TP de 2R. Modo 2 = invalidación desactivada.
+- `InpATRMaximoPuntos` (default 0 = off): techo de volatilidad opcional para excluir regímenes extremos; pensado para optimizarse en el Strategy Tester.
+
 **Comprueba el GMT offset de tu broker** (la hora del panel del EA muestra la hora del servidor) y ajusta los inputs de horario si difiere. Recuerda también que EE.UU. y Europa cambian al horario de verano en fechas distintas (≈2 semanas en marzo y 1 en octubre/noviembre): revisa los horarios en esos periodos.
 
 ---

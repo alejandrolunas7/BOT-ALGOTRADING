@@ -50,6 +50,10 @@ input int      InpMACD_Rapida        = 12;         // MACD: EMA rápida
 input int      InpMACD_Lenta         = 26;         // MACD: EMA lenta
 input int      InpMACD_Senal         = 9;          // MACD: SMA de la señal
 input int      InpPeriodoATR         = 14;         // Periodo del ATR
+input int      InpPendienteEMABarras = 20;         // Filtro de pendiente: EMA debe subir/bajar vs hace N velas (0 = off)
+
+input group "=== 2b. GESTIÓN DE LA SALIDA POR INVALIDACIÓN ==="
+input int      InpModoInvalidacion   = 1;          // Cruce MACD contrario: 0=cierra siempre, 1=solo si hay pérdida, 2=nunca
 
 input group "=== 3. GESTIÓN DE RIESGO ==="
 input double   InpRiesgoPorOperacion = 1.0;        // Riesgo por operación (% de la Equity)
@@ -58,6 +62,7 @@ input double   InpMultiplicadorTP    = 3.0;        // TP = ATR x este multiplica
 input double   InpPerdidaDiariaMax   = 3.0;        // Kill Switch: pérdida diaria máxima (% del balance)
 input int      InpMaxOperacionesDia  = 4;          // Máximo de operaciones por día
 input int      InpATRMinimoPuntos    = 500;        // ATR mínimo en puntos para operar (filtro de mercado muerto)
+input int      InpATRMaximoPuntos    = 0;          // ATR máximo en puntos para operar (0 = sin límite)
 input double   InpLoteMaximo         = 5.0;        // Lote máximo absoluto (techo de seguridad)
 
 input group "=== 4. BREAKEVEN Y TRAILING STOP ==="
@@ -278,6 +283,18 @@ void OnTick()
       return;
      }
 
+   //--- 10c. Filtro de VOLATILIDAD MÁXIMA (opcional, 0 = desactivado).
+   //    El backtest mostró que en regímenes de volatilidad extrema (2025)
+   //    el precio rara vez recorre 3xATR sin un cruce contrario del MACD:
+   //    la estrategia pierde su motor de beneficios. Este techo permite
+   //    excluir esos regímenes (valor optimizable en el Strategy Tester).
+   if(InpATRMaximoPuntos > 0 && g_atr_actual > InpATRMaximoPuntos * _Point)
+     {
+      Print("Entrada descartada: ATR actual (", DoubleToString(g_atr_actual / _Point, 0),
+            " pts) > máximo permitido (", InpATRMaximoPuntos, " pts). Volatilidad extrema.");
+      return;
+     }
+
    //--- 11. Evaluación de los triggers de entrada
    if(HaySenalDeCompra())
       AbrirOperacion(ORDER_TYPE_BUY, tick);
@@ -305,7 +322,10 @@ bool CopiarIndicadores()
   {
    //--- Pedimos 2 valores empezando en la vela [1] (la última CERRADA).
    //    Tras ArraySetAsSeries: buffer[0] = vela [1], buffer[1] = vela [2].
-   if(CopyBuffer(g_handle_ema, 0, 1, 2, g_ema) < 2)
+   //    Para la EMA pedimos además profundidad extra si el filtro de
+   //    pendiente está activo: g_ema[N] = valor de la EMA hace N velas.
+   int profundidad_ema = MathMax(2, InpPendienteEMABarras + 1);
+   if(CopyBuffer(g_handle_ema, 0, 1, profundidad_ema, g_ema) < profundidad_ema)
      { Print("Aviso: EMA sin datos suficientes todavía."); return(false); }
 
    if(CopyBuffer(g_handle_macd, 0, 1, 2, g_macd_main) < 2)     // Buffer 0 = línea principal
@@ -332,6 +352,14 @@ bool HaySenalDeCompra()
    //--- 1. Filtro de tendencia: el precio cerró POR ENCIMA de la EMA 200
    bool tendencia_alcista = (cierre_1 > g_ema[0]);
 
+   //--- 1b. Filtro de CALIDAD de tendencia: la EMA 200 debe estar SUBIENDO
+   //    respecto a hace N velas. Lección del backtest 2025: en mercados
+   //    laterales volátiles el precio cruza la EMA constantemente y el
+   //    filtro de posición (precio vs EMA) da señales falsas; exigir
+   //    pendiente positiva descarta las entradas en rango.
+   if(InpPendienteEMABarras > 0)
+      tendencia_alcista = tendencia_alcista && (g_ema[0] > g_ema[InpPendienteEMABarras]);
+
    //--- 2. Filtro de pullback: el MACD principal está en territorio NEGATIVO
    //    (confirma que venimos de un retroceso dentro de la tendencia alcista)
    bool pullback_confirmado = (g_macd_main[0] < 0.0);
@@ -352,6 +380,11 @@ bool HaySenalDeVenta()
 
    //--- 1. Filtro de tendencia: el precio cerró POR DEBAJO de la EMA 200
    bool tendencia_bajista = (cierre_1 < g_ema[0]);
+
+   //--- 1b. Filtro de CALIDAD de tendencia: la EMA 200 debe estar BAJANDO
+   //    respecto a hace N velas (espejo del filtro de compra).
+   if(InpPendienteEMABarras > 0)
+      tendencia_bajista = tendencia_bajista && (g_ema[0] < g_ema[InpPendienteEMABarras]);
 
    //--- 2. Filtro de pullback: el MACD principal está en territorio POSITIVO
    //    (confirma el rebote alcista dentro de la tendencia bajista)
@@ -579,6 +612,10 @@ int ContarPosicionesPropias()
 //+------------------------------------------------------------------+
 void GestionarInvalidacionTecnica()
   {
+   //--- Modo 2 = invalidación desactivada (solo gestionan SL/TP/trailing)
+   if(InpModoInvalidacion == 2)
+      return;
+
    //--- Cruces detectados en la última vela cerrada
    bool cruce_bajista = (g_macd_main[1] >= g_macd_signal[1] && g_macd_main[0] < g_macd_signal[0]);
    bool cruce_alcista = (g_macd_main[1] <= g_macd_signal[1] && g_macd_main[0] > g_macd_signal[0]);
@@ -594,13 +631,23 @@ void GestionarInvalidacionTecnica()
 
       long tipo = PositionGetInteger(POSITION_TYPE);
 
-      //--- Estamos COMPRADOS y el MACD cruzó a la BAJA => tesis invalidada
-      if(tipo == POSITION_TYPE_BUY && cruce_bajista)
-         CerrarPosicion(ticket, "Invalidación técnica: cruce bajista del MACD");
+      //--- ¿Hay cruce contrario a nuestra posición?
+      bool cruce_contrario = (tipo == POSITION_TYPE_BUY  && cruce_bajista) ||
+                             (tipo == POSITION_TYPE_SELL && cruce_alcista);
+      if(!cruce_contrario)
+         continue;
 
-      //--- Estamos VENDIDOS y el MACD cruzó al ALZA => tesis invalidada
-      if(tipo == POSITION_TYPE_SELL && cruce_alcista)
-         CerrarPosicion(ticket, "Invalidación técnica: cruce alcista del MACD");
+      //--- Modo 1 (recomendado): solo cerramos si la posición está EN PÉRDIDA.
+      //    Lección del backtest 2025: cerrar también las posiciones en
+      //    beneficio amputaba sistemáticamente la cola derecha (los +2R del
+      //    TP casi desaparecieron). Si la operación va ganando, el cruce se
+      //    ignora y dejan trabajar el Breakeven/Trailing, que ya protegen.
+      if(InpModoInvalidacion == 1 && PositionGetDouble(POSITION_PROFIT) > 0.0)
+         continue;
+
+      CerrarPosicion(ticket, tipo == POSITION_TYPE_BUY
+                             ? "Invalidación técnica: cruce bajista del MACD"
+                             : "Invalidación técnica: cruce alcista del MACD");
      }
   }
 
