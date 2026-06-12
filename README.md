@@ -52,9 +52,11 @@ Además, `InpMinutosSinEntradas` (default 45) bloquea las entradas nuevas en los
 
 **Filtros de régimen de mercado** (añadidos tras el análisis del backtest 2023–2026, donde la estrategia ganaba en 2023–24 y se degradaba en el régimen lateral-volátil de 2025):
 
-- `InpPendienteEMABarras` (default 20, 0 = off): exige que la EMA 200 esté subiendo (largos) o bajando (cortos) respecto a hace N velas. Evita las señales falsas cuando el precio cruza una EMA plana en mercado en rango.
-- `InpModoInvalidacion` (default 1): el cruce contrario del MACD cierra la posición **solo si está en pérdida**. Con el modo antiguo (0 = cerrar siempre) los cruces amputaban las operaciones ganadoras antes de llegar al TP de 2R. Modo 2 = invalidación desactivada.
-- `InpATRMaximoPuntos` (default 0 = off): techo de volatilidad opcional para excluir regímenes extremos; pensado para optimizarse en el Strategy Tester.
+- `InpPendienteEMABarras` (default 0 = off): exige que la EMA 200 esté subiendo (largos) o bajando (cortos) respecto a hace N velas. Filtra el rango, pero en backtest también eliminó operaciones ganadoras: optimízalo (10–40) en lugar de fijarlo a mano.
+- `InpModoInvalidacion` (default 0 = comportamiento original): 1 = el cruce contrario del MACD solo cierra posiciones en pérdida; 2 = invalidación desactivada. Optimizable.
+- `InpATRMaximoPuntos` (default 0 = off): techo de volatilidad opcional para excluir regímenes extremos. Optimizable.
+
+**Criterio de optimización personalizado (`OnTester`)**: el EA expone la métrica `(beneficio neto / drawdown máximo) × √nº de operaciones` y descarta combinaciones con menos de 50 trades. En el Strategy Tester selecciona **"Custom max"** como criterio de optimización: evita que el optimizador elija curvas con pocas operaciones afortunadas o con drawdowns inasumibles.
 
 **Comprueba el GMT offset de tu broker** (la hora del panel del EA muestra la hora del servidor) y ajusta los inputs de horario si difiere. Recuerda también que EE.UU. y Europa cambian al horario de verano en fechas distintas (≈2 semanas en marzo y 1 en octubre/noviembre): revisa los horarios en esos periodos.
 

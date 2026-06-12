@@ -50,10 +50,10 @@ input int      InpMACD_Rapida        = 12;         // MACD: EMA rápida
 input int      InpMACD_Lenta         = 26;         // MACD: EMA lenta
 input int      InpMACD_Senal         = 9;          // MACD: SMA de la señal
 input int      InpPeriodoATR         = 14;         // Periodo del ATR
-input int      InpPendienteEMABarras = 20;         // Filtro de pendiente: EMA debe subir/bajar vs hace N velas (0 = off)
+input int      InpPendienteEMABarras = 0;          // Filtro de pendiente EMA vs hace N velas (0 = off, optimizable 10-40)
 
 input group "=== 2b. GESTIÓN DE LA SALIDA POR INVALIDACIÓN ==="
-input int      InpModoInvalidacion   = 1;          // Cruce MACD contrario: 0=cierra siempre, 1=solo si hay pérdida, 2=nunca
+input int      InpModoInvalidacion   = 0;          // Cruce MACD contrario: 0=cierra siempre, 1=solo si hay pérdida, 2=nunca
 
 input group "=== 3. GESTIÓN DE RIESGO ==="
 input double   InpRiesgoPorOperacion = 1.0;        // Riesgo por operación (% de la Equity)
@@ -1077,5 +1077,32 @@ void ActualizarPanel(const MqlTick &tick)
       "Posiciones EA.....: ", ContarPosicionesPropias(), " / 1\n",
       "════════════════════════════════════════"
      );
+  }
+
+//+------------------------------------------------------------------+
+//| OnTester: criterio PERSONALIZADO de optimización.                |
+//| En el Strategy Tester, selecciona "Custom max" como criterio.    |
+//|                                                                  |
+//| Métrica = (Beneficio neto / Drawdown máximo) * sqrt(nº trades)   |
+//|                                                                  |
+//| ¿Por qué esta métrica y no el beneficio neto?                    |
+//|  - Penaliza las curvas con grandes caídas (divide por el DD).    |
+//|  - Premia el tamaño de muestra (sqrt evita que 5 operaciones     |
+//|    afortunadas parezcan mejores que 200 consistentes).           |
+//|  - Descarta combinaciones con menos de 50 trades: sin muestra    |
+//|    estadística, cualquier resultado es ruido (sobreajuste).      |
+//+------------------------------------------------------------------+
+double OnTester()
+  {
+   double trades = TesterStatistics(STAT_TRADES);
+   if(trades < 50.0)
+      return(0.0);   // Muestra insuficiente: la combinación no es evaluable
+
+   double neto = TesterStatistics(STAT_PROFIT);
+   double dd   = TesterStatistics(STAT_BALANCE_DD);   // Drawdown máximo del balance en dinero
+   if(dd < 1.0)
+      dd = 1.0;      // Evita divisiones por cero en curvas sin retrocesos
+
+   return(neto / dd * MathSqrt(trades));
   }
 //+------------------------------------------------------------------+
