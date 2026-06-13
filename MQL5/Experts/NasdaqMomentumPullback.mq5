@@ -3,12 +3,11 @@
 //|                          Estrategia: "Nasdaq Momentum Pullback"  |
 //|                                                                  |
 //|  LÓGICA GENERAL (evaluada SIEMPRE al cierre de vela M15):        |
+//|   - Filtro de régimen ........: ADX >= umbral (solo con tendencia)|
 //|   - Filtro de tendencia ......: EMA 200 (cierre vs media)        |
-//|   - Filtro de pullback .......: línea principal del MACD          |
-//|                                 (negativa para LONG, positiva    |
-//|                                  para SHORT)                     |
-//|   - Gatillo ..................: cruce MACD línea/señal en la     |
-//|                                 última vela cerrada              |
+//|   - Gatillo (seleccionable):                                     |
+//|       * Modo 0: cruce de la línea/señal del MACD (original)      |
+//|       * Modo 1: pullback a la EMA rápida + vela de confirmación  |
 //|   - SL dinámico ..............: 1.5 x ATR(14)                    |
 //|   - TP dinámico ..............: 3.0 x ATR(14)  (ratio 1:2)       |
 //|   - Lotaje ...................: % de riesgo sobre la Equity      |
@@ -30,9 +29,9 @@
 //|  los inputs de horario según el GMT offset de TU broker.         |
 //+------------------------------------------------------------------+
 #property copyright "BOT-ALGOTRADING"
-#property version   "1.00"
+#property version   "2.00"
 #property strict
-#property description "EA de seguimiento de tendencia con pullback (EMA200 + MACD + ATR) para NASDAQ en M15."
+#property description "EA de seguimiento de tendencia con pullback (EMA200 + ADX + MACD/EMA rápida + ATR) para NASDAQ en M15."
 
 //--- Librería estándar de trading de MetaQuotes (envoltorio de OrderSend)
 #include <Trade\Trade.mqh>
@@ -45,12 +44,19 @@ input long     InpMagicNumber        = 20260611;   // Magic Number (identificado
 input string   InpComentarioOrden    = "NQ-MomPullback"; // Comentario de las órdenes
 
 input group "=== 2. INDICADORES ==="
-input int      InpPeriodoEMA         = 200;        // Periodo de la EMA de tendencia
+input int      InpPeriodoEMA         = 200;        // Periodo de la EMA de tendencia (lenta)
+input int      InpEMARapida          = 50;         // Periodo de la EMA rápida (pullback en modo 1)
 input int      InpMACD_Rapida        = 12;         // MACD: EMA rápida
 input int      InpMACD_Lenta         = 26;         // MACD: EMA lenta
 input int      InpMACD_Senal         = 9;          // MACD: SMA de la señal
 input int      InpPeriodoATR         = 14;         // Periodo del ATR
 input int      InpPendienteEMABarras = 0;          // Filtro de pendiente EMA vs hace N velas (0 = off, optimizable 10-40)
+
+input group "=== 2a. LÓGICA DE ENTRADA ==="
+input int      InpModoEntrada        = 1;          // Señal: 0=Cruce MACD (original), 1=Pullback a EMA rápida
+input bool     InpUsarADX            = true;       // Filtro de RÉGIMEN: operar solo si hay tendencia (ADX)
+input int      InpPeriodoADX         = 14;         // Periodo del ADX
+input double   InpADXMinimo          = 23.0;       // ADX mínimo para considerar que hay tendencia
 
 input group "=== 2b. GESTIÓN DE LA SALIDA POR INVALIDACIÓN ==="
 input int      InpModoInvalidacion   = 0;          // Cruce MACD contrario: 0=cierra siempre, 1=solo si hay pérdida, 2=nunca
@@ -96,9 +102,11 @@ input bool     InpMostrarPanel       = true;       // Mostrar panel de estado en
 //| VARIABLES GLOBALES                                               |
 //+------------------------------------------------------------------+
 CTrade   g_trade;                  // Objeto de trading de la librería estándar
-int      g_handle_ema    = INVALID_HANDLE;  // Handle del indicador EMA 200
+int      g_handle_ema    = INVALID_HANDLE;  // Handle de la EMA lenta (200, tendencia)
+int      g_handle_ema_r  = INVALID_HANDLE;  // Handle de la EMA rápida (50, pullback)
 int      g_handle_macd   = INVALID_HANDLE;  // Handle del indicador MACD
 int      g_handle_atr    = INVALID_HANDLE;  // Handle del indicador ATR
+int      g_handle_adx    = INVALID_HANDLE;  // Handle del indicador ADX (régimen)
 
 datetime g_ultima_vela   = 0;      // Hora de apertura de la última vela procesada (detector de vela nueva)
 double   g_atr_actual    = 0.0;    // ATR de la última vela cerrada (cacheado, se usa en el trailing)
@@ -107,10 +115,12 @@ bool     g_killswitch_activo  = false; // true = pérdida diaria superada, no se
 datetime g_dia_killswitch     = 0;     // Día en el que se activó el Kill Switch
 
 //--- Buffers de indicadores (índice 0 = vela [1], índice 1 = vela [2])
-double   g_ema[];                  // EMA 200
+double   g_ema[];                  // EMA 200 (lenta)
+double   g_ema_r[];                // EMA rápida (50)
 double   g_macd_main[];            // MACD línea principal
 double   g_macd_signal[];          // MACD línea de señal
 double   g_atr[];                  // ATR
+double   g_adx[];                  // ADX (fuerza de tendencia)
 
 //+------------------------------------------------------------------+
 //| OnInit: inicialización del EA                                    |
@@ -138,14 +148,27 @@ int OnInit()
       Print("ERROR de configuración: límites diarios inválidos.");
       return(INIT_PARAMETERS_INCORRECT);
      }
+   if(InpModoEntrada < 0 || InpModoEntrada > 1)
+     {
+      Print("ERROR de configuración: InpModoEntrada debe ser 0 (MACD) o 1 (Pullback EMA).");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+   if(InpEMARapida <= 0 || InpEMARapida >= InpPeriodoEMA)
+     {
+      Print("ERROR de configuración: la EMA rápida debe ser menor que la EMA lenta (200).");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
 
    //--- 2. Creación de los handles de los indicadores
    //    En MQL5 los indicadores se calculan en el terminal y se leen con CopyBuffer.
    g_handle_ema  = iMA(_Symbol, PERIOD_CURRENT, InpPeriodoEMA, 0, MODE_EMA, PRICE_CLOSE);
+   g_handle_ema_r= iMA(_Symbol, PERIOD_CURRENT, InpEMARapida, 0, MODE_EMA, PRICE_CLOSE);
    g_handle_macd = iMACD(_Symbol, PERIOD_CURRENT, InpMACD_Rapida, InpMACD_Lenta, InpMACD_Senal, PRICE_CLOSE);
    g_handle_atr  = iATR(_Symbol, PERIOD_CURRENT, InpPeriodoATR);
+   g_handle_adx  = iADX(_Symbol, PERIOD_CURRENT, InpPeriodoADX);
 
-   if(g_handle_ema == INVALID_HANDLE || g_handle_macd == INVALID_HANDLE || g_handle_atr == INVALID_HANDLE)
+   if(g_handle_ema == INVALID_HANDLE || g_handle_ema_r == INVALID_HANDLE || g_handle_macd == INVALID_HANDLE ||
+      g_handle_atr == INVALID_HANDLE || g_handle_adx == INVALID_HANDLE)
      {
       Print("ERROR: no se pudieron crear los indicadores. Código: ", GetLastError());
       return(INIT_FAILED);
@@ -154,9 +177,11 @@ int OnInit()
    //--- 3. Configuración de los buffers como series temporales
    //    (índice 0 = el dato más reciente solicitado)
    ArraySetAsSeries(g_ema, true);
+   ArraySetAsSeries(g_ema_r, true);
    ArraySetAsSeries(g_macd_main, true);
    ArraySetAsSeries(g_macd_signal, true);
    ArraySetAsSeries(g_atr, true);
+   ArraySetAsSeries(g_adx, true);
 
    //--- 4. Configuración del objeto de trading
    g_trade.SetExpertMagicNumber(InpMagicNumber);          // El EA solo gestionará SUS órdenes
@@ -191,9 +216,11 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    //--- Liberamos los handles de los indicadores para no dejar basura en memoria
-   if(g_handle_ema  != INVALID_HANDLE) IndicatorRelease(g_handle_ema);
-   if(g_handle_macd != INVALID_HANDLE) IndicatorRelease(g_handle_macd);
-   if(g_handle_atr  != INVALID_HANDLE) IndicatorRelease(g_handle_atr);
+   if(g_handle_ema   != INVALID_HANDLE) IndicatorRelease(g_handle_ema);
+   if(g_handle_ema_r != INVALID_HANDLE) IndicatorRelease(g_handle_ema_r);
+   if(g_handle_macd  != INVALID_HANDLE) IndicatorRelease(g_handle_macd);
+   if(g_handle_atr   != INVALID_HANDLE) IndicatorRelease(g_handle_atr);
+   if(g_handle_adx   != INVALID_HANDLE) IndicatorRelease(g_handle_adx);
 
    //--- Limpiamos el panel de comentarios del gráfico
    Comment("");
@@ -326,7 +353,11 @@ bool CopiarIndicadores()
    //    pendiente está activo: g_ema[N] = valor de la EMA hace N velas.
    int profundidad_ema = MathMax(2, InpPendienteEMABarras + 1);
    if(CopyBuffer(g_handle_ema, 0, 1, profundidad_ema, g_ema) < profundidad_ema)
-     { Print("Aviso: EMA sin datos suficientes todavía."); return(false); }
+     { Print("Aviso: EMA lenta sin datos suficientes todavía."); return(false); }
+
+   //--- EMA rápida: necesitamos las velas [1] y [2] para detectar el rebote
+   if(CopyBuffer(g_handle_ema_r, 0, 1, 2, g_ema_r) < 2)
+     { Print("Aviso: EMA rápida sin datos suficientes."); return(false); }
 
    if(CopyBuffer(g_handle_macd, 0, 1, 2, g_macd_main) < 2)     // Buffer 0 = línea principal
      { Print("Aviso: MACD (principal) sin datos suficientes."); return(false); }
@@ -337,63 +368,131 @@ bool CopiarIndicadores()
    if(CopyBuffer(g_handle_atr, 0, 1, 2, g_atr) < 2)
      { Print("Aviso: ATR sin datos suficientes."); return(false); }
 
+   //--- ADX: buffer 0 = línea principal (fuerza de tendencia, 0-100)
+   if(CopyBuffer(g_handle_adx, 0, 1, 2, g_adx) < 2)
+     { Print("Aviso: ADX sin datos suficientes."); return(false); }
+
    //--- Cacheamos el ATR de la última vela cerrada para el Trailing Stop
    g_atr_actual = g_atr[0];
    return(true);
   }
 
 //+------------------------------------------------------------------+
-//| TRIGGER DE COMPRA (todas las condiciones sobre velas cerradas)   |
+//| FILTRO DE RÉGIMEN: ¿hay tendencia suficiente para operar?        |
+//| El gran hallazgo de la validación forward fue que el sistema     |
+//| pierde sistemáticamente en mercados laterales. El ADX mide la    |
+//| FUERZA de la tendencia (sin importar su dirección): por debajo   |
+//| del umbral el mercado está en rango y NO operamos. Este es el    |
+//| filtro estructural que faltaba.                                  |
 //+------------------------------------------------------------------+
-bool HaySenalDeCompra()
+bool RegimenConTendencia()
   {
-   double cierre_1 = iClose(_Symbol, PERIOD_CURRENT, 1);   // Cierre de la última vela cerrada
-
-   //--- 1. Filtro de tendencia: el precio cerró POR ENCIMA de la EMA 200
-   bool tendencia_alcista = (cierre_1 > g_ema[0]);
-
-   //--- 1b. Filtro de CALIDAD de tendencia: la EMA 200 debe estar SUBIENDO
-   //    respecto a hace N velas. Lección del backtest 2025: en mercados
-   //    laterales volátiles el precio cruza la EMA constantemente y el
-   //    filtro de posición (precio vs EMA) da señales falsas; exigir
-   //    pendiente positiva descarta las entradas en rango.
-   if(InpPendienteEMABarras > 0)
-      tendencia_alcista = tendencia_alcista && (g_ema[0] > g_ema[InpPendienteEMABarras]);
-
-   //--- 2. Filtro de pullback: el MACD principal está en territorio NEGATIVO
-   //    (confirma que venimos de un retroceso dentro de la tendencia alcista)
-   bool pullback_confirmado = (g_macd_main[0] < 0.0);
-
-   //--- 3. Gatillo: cruce ALCISTA de la línea principal sobre la señal
-   //    En la vela [2] estaba por debajo o igual; en la vela [1] cruzó hacia arriba.
-   bool cruce_alcista = (g_macd_main[1] <= g_macd_signal[1] && g_macd_main[0] > g_macd_signal[0]);
-
-   return(tendencia_alcista && pullback_confirmado && cruce_alcista);
+   if(!InpUsarADX)
+      return(true);                 // Filtro desactivado
+   return(g_adx[0] >= InpADXMinimo);
   }
 
 //+------------------------------------------------------------------+
-//| TRIGGER DE VENTA (espejo exacto del de compra)                   |
+//| Filtro de tendencia direccional común (precio vs EMA200 + pend.) |
+//| direccion = +1 para comprobar tendencia alcista, -1 para bajista.|
 //+------------------------------------------------------------------+
-bool HaySenalDeVenta()
+bool TendenciaAFavor(int direccion)
   {
    double cierre_1 = iClose(_Symbol, PERIOD_CURRENT, 1);
 
-   //--- 1. Filtro de tendencia: el precio cerró POR DEBAJO de la EMA 200
-   bool tendencia_bajista = (cierre_1 < g_ema[0]);
+   //--- Posición del precio respecto a la EMA 200 (lenta)
+   bool ok = (direccion > 0) ? (cierre_1 > g_ema[0]) : (cierre_1 < g_ema[0]);
 
-   //--- 1b. Filtro de CALIDAD de tendencia: la EMA 200 debe estar BAJANDO
-   //    respecto a hace N velas (espejo del filtro de compra).
+   //--- Filtro opcional de PENDIENTE de la EMA200 vs hace N velas
    if(InpPendienteEMABarras > 0)
-      tendencia_bajista = tendencia_bajista && (g_ema[0] < g_ema[InpPendienteEMABarras]);
+     {
+      bool pendiente = (direccion > 0) ? (g_ema[0] > g_ema[InpPendienteEMABarras])
+                                       : (g_ema[0] < g_ema[InpPendienteEMABarras]);
+      ok = ok && pendiente;
+     }
+   return(ok);
+  }
 
-   //--- 2. Filtro de pullback: el MACD principal está en territorio POSITIVO
-   //    (confirma el rebote alcista dentro de la tendencia bajista)
-   bool pullback_confirmado = (g_macd_main[0] > 0.0);
+//+------------------------------------------------------------------+
+//| GATILLO MODO 0: cruce del MACD (lógica original)                 |
+//+------------------------------------------------------------------+
+bool GatilloMACD(int direccion)
+  {
+   if(direccion > 0)
+     {
+      bool pullback = (g_macd_main[0] < 0.0);  // MACD negativo = veníamos de retroceso
+      bool cruce    = (g_macd_main[1] <= g_macd_signal[1] && g_macd_main[0] > g_macd_signal[0]);
+      return(pullback && cruce);
+     }
+   else
+     {
+      bool pullback = (g_macd_main[0] > 0.0);
+      bool cruce    = (g_macd_main[1] >= g_macd_signal[1] && g_macd_main[0] < g_macd_signal[0]);
+      return(pullback && cruce);
+     }
+  }
 
-   //--- 3. Gatillo: cruce BAJISTA de la línea principal bajo la señal
-   bool cruce_bajista = (g_macd_main[1] >= g_macd_signal[1] && g_macd_main[0] < g_macd_signal[0]);
+//+------------------------------------------------------------------+
+//| GATILLO MODO 1: pullback a la EMA rápida con vela de confirmación|
+//|                                                                  |
+//| Idea: en una tendencia (EMA rápida del lado correcto de la       |
+//| EMA200), esperamos a que el precio RETROCEDA a tocar la EMA      |
+//| rápida y luego REANUDE la tendencia con una vela a favor. Es un  |
+//| "comprar el retroceso", no perseguir el cruce de un oscilador.   |
+//|                                                                  |
+//| COMPRA: 1) EMA rápida por encima de la EMA200 (estructura alcista)|
+//|         2) el mínimo de la vela [1] tocó/perforó la EMA rápida   |
+//|            (el retroceso llegó a la media)                       |
+//|         3) la vela [1] cerró POR ENCIMA de la EMA rápida y fue   |
+//|            alcista (close>open): el rebote está confirmado       |
+//+------------------------------------------------------------------+
+bool GatilloPullbackEMA(int direccion)
+  {
+   double open_1  = iOpen(_Symbol, PERIOD_CURRENT, 1);
+   double close_1 = iClose(_Symbol, PERIOD_CURRENT, 1);
+   double high_1  = iHigh(_Symbol, PERIOD_CURRENT, 1);
+   double low_1   = iLow(_Symbol, PERIOD_CURRENT, 1);
 
-   return(tendencia_bajista && pullback_confirmado && cruce_bajista);
+   if(direccion > 0)
+     {
+      bool estructura = (g_ema_r[0] > g_ema[0]);             // EMA rápida sobre la lenta
+      bool toco_media = (low_1 <= g_ema_r[0]);               // el retroceso tocó la EMA rápida
+      bool rebote     = (close_1 > g_ema_r[0]) && (close_1 > open_1); // cierre alcista por encima
+      return(estructura && toco_media && rebote);
+     }
+   else
+     {
+      bool estructura = (g_ema_r[0] < g_ema[0]);             // EMA rápida bajo la lenta
+      bool toco_media = (high_1 >= g_ema_r[0]);              // el rebote tocó la EMA rápida
+      bool rebote     = (close_1 < g_ema_r[0]) && (close_1 < open_1); // cierre bajista por debajo
+      return(estructura && toco_media && rebote);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Despacha el gatillo según el modo de entrada configurado         |
+//+------------------------------------------------------------------+
+bool Gatillo(int direccion)
+  {
+   if(InpModoEntrada == 0)
+      return(GatilloMACD(direccion));
+   return(GatilloPullbackEMA(direccion));
+  }
+
+//+------------------------------------------------------------------+
+//| SEÑAL DE COMPRA = régimen + tendencia alcista + gatillo          |
+//+------------------------------------------------------------------+
+bool HaySenalDeCompra()
+  {
+   return(RegimenConTendencia() && TendenciaAFavor(+1) && Gatillo(+1));
+  }
+
+//+------------------------------------------------------------------+
+//| SEÑAL DE VENTA = régimen + tendencia bajista + gatillo           |
+//+------------------------------------------------------------------+
+bool HaySenalDeVenta()
+  {
+   return(RegimenConTendencia() && TendenciaAFavor(-1) && Gatillo(-1));
   }
 
 //+------------------------------------------------------------------+
@@ -1051,6 +1150,8 @@ void ActualizarPanel(const MqlTick &tick)
    double spread_pts   = (tick.ask - tick.bid) / _Point;
    double resultado_hoy = ResultadoRealizadoHoy();
    int    ops_hoy       = ContarOperacionesDeHoy();
+   //--- El buffer del ADX solo está disponible tras el primer cierre de vela
+   double adx_actual    = (ArraySize(g_adx) > 0) ? g_adx[0] : 0.0;
 
    string estado;
    if(g_killswitch_activo)
@@ -1070,6 +1171,9 @@ void ActualizarPanel(const MqlTick &tick)
       "Hora servidor.....: ", TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES), "\n",
       "Spread actual.....: ", DoubleToString(spread_pts, 0), " pts (máx: ", InpSpreadMaximo, ")\n",
       "ATR(", InpPeriodoATR, ") vela [1]..: ", DoubleToString(g_atr_actual, _Digits), "\n",
+      "Modo entrada......: ", (InpModoEntrada == 0 ? "0 = Cruce MACD" : "1 = Pullback EMA rápida"), "\n",
+      "ADX(", InpPeriodoADX, ").........: ", DoubleToString(adx_actual, 1),
+            (InpUsarADX ? (adx_actual >= InpADXMinimo ? " (TENDENCIA)" : " (RANGO: sin operar)") : " (filtro off)"), "\n",
       "Riesgo/operación..: ", DoubleToString(InpRiesgoPorOperacion, 1), "% de la Equity\n",
       "Equity............: ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2), "\n",
       "Operaciones hoy...: ", ops_hoy, " / ", InpMaxOperacionesDia, "\n",

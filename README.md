@@ -10,11 +10,13 @@ Expert Advisor para MetaTrader 5 que opera el **NASDAQ (NAS100 / USTEC / US100, 
 
 Todas las señales se evalúan **estrictamente al cierre de vela M15** (vela `[1]`), nunca tick a tick.
 
+> **v2.0 — Rediseño de la señal de entrada.** La validación forward (optimización 2023–2025 + test ciego 2025–2026) demostró que la señal original (cruce MACD + EMA200) **no tenía edge repetible**: de 114 combinaciones de parámetros, 52 eran rentables en el periodo de optimización pero **0 sobrevivían al periodo forward**. Era una estrategia dependiente del régimen alcista de 2023–24. La v2 conserva intacta toda la arquitectura de gestión de riesgo y añade dos cambios estructurales en la entrada (ver abajo). El histórico completo de este proceso está en el log de commits.
+
 | Bloque | Regla |
 |---|---|
+| **Filtro de régimen (NUEVO)** | **ADX(14) ≥ umbral** (default 23): solo se opera con tendencia real; en rango el EA no entra. Es la corrección de raíz del fallo forward. |
 | Filtro de tendencia | Cierre `[1]` por encima (LONG) / debajo (SHORT) de la **EMA 200** |
-| Filtro de pullback | Línea principal del **MACD (12, 26, 9)** negativa (LONG) / positiva (SHORT) |
-| Gatillo de entrada | Cruce de la línea principal del MACD sobre/bajo la señal en la vela `[1]` |
+| Gatillo de entrada (seleccionable) | **Modo 0** = cruce MACD original · **Modo 1 (NUEVO, default)** = pullback a la **EMA rápida (50)**: el precio retrocede a tocar la media y reanuda con una vela de confirmación a favor |
 | Stop Loss | `1.5 × ATR(14)` desde el precio de entrada |
 | Take Profit | `3.0 × ATR(14)` → ratio Riesgo/Beneficio **1:2** |
 | Lotaje | Dinámico: **1% de la Equity** según la distancia exacta del SL |
@@ -57,6 +59,19 @@ Además, `InpMinutosSinEntradas` (default 45) bloquea las entradas nuevas en los
 - `InpATRMaximoPuntos` (default 0 = off): techo de volatilidad opcional para excluir regímenes extremos. Optimizable.
 
 **Criterio de optimización personalizado (`OnTester`)**: el EA expone la métrica `(beneficio neto / drawdown máximo) × √nº de operaciones` y descarta combinaciones con menos de 50 trades. En el Strategy Tester selecciona **"Custom max"** como criterio de optimización: evita que el optimizador elija curvas con pocas operaciones afortunadas o con drawdowns inasumibles.
+
+### Plan de test de la v2 (señal rediseñada)
+
+Antes de optimizar, haz **un único backtest** con los defaults nuevos (`InpModoEntrada=1`, `InpUsarADX=true`, `InpADXMinimo=23`, `InpEMARapida=50`) sobre USTEC M15 2023–2026 y compara la curva con la v1. Después, optimiza con **forward 1/3** y "Custom max" estos parámetros:
+
+| Parámetro (texto en MT5) | Variable | Inicio | Paso | Stop |
+|---|---|---|---|---|
+| ADX mínimo para considerar que hay tendencia | `InpADXMinimo` | 18 | 3 | 33 |
+| Periodo de la EMA rápida (pullback en modo 1) | `InpEMARapida` | 20 | 10 | 60 |
+| SL = ATR x este multiplicador | `InpMultiplicadorSL` | 1.0 | 0.5 | 2.5 |
+| TP = ATR x este multiplicador | `InpMultiplicadorTP` | 2.0 | 0.5 | 4.0 |
+
+**Criterio de aceptación honesto**: solo es candidata a real una configuración que sea rentable **tanto en optimización como en forward** (lo que la v1 nunca logró). Si ninguna lo consigue, la conclusión correcta es que la señal sigue sin edge — no forzar la elección de "la menos mala".
 
 **Comprueba el GMT offset de tu broker** (la hora del panel del EA muestra la hora del servidor) y ajusta los inputs de horario si difiere. Recuerda también que EE.UU. y Europa cambian al horario de verano en fechas distintas (≈2 semanas en marzo y 1 en octubre/noviembre): revisa los horarios en esos periodos.
 
