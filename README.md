@@ -73,6 +73,20 @@ Antes de optimizar, haz **un único backtest** con los defaults nuevos (`InpModo
 
 **Criterio de aceptación honesto**: solo es candidata a real una configuración que sea rentable **tanto en optimización como en forward** (lo que la v1 nunca logró). Si ninguna lo consigue, la conclusión correcta es que la señal sigue sin edge — no forzar la elección de "la menos mala".
 
+### Diagnóstico de exits (backtest v2, USTEC M15 2023–2026)
+
+El backtest de la v2 (PF 0.89, 239 ops) reveló que la relación riesgo/beneficio **real** era 1,2:1 en lugar del 2:1 teórico: tres mecanismos cortaban a los ganadores antes del TP — breakeven, trailing y, sobre todo, el **cierre forzado diario** (58 de 239 operaciones, +4 $ de media). Para aislar este efecto se añadió `InpCerrarFinDia` (default `true`).
+
+**Test comparativo recomendado** (3 backtests, mismos defaults de entrada, en "1 minuto OHLC"):
+
+| Config | Breakeven | Trailing | Cierre diario | Objetivo |
+|---|---|---|---|---|
+| A (baseline) | ON | ON | ON | Referencia actual |
+| B (dejar correr) | OFF | OFF | OFF | TP puro 2R, sin amputar ganadores |
+| C (intermedia) | OFF | ON, activación 2.5R | OFF | Trailing solo en movimientos grandes |
+
+> ⚠️ `InpCerrarFinDia=false` reintroduce el riesgo de gap nocturno. El SL sigue puesto en el servidor, pero un gap puede saltárselo. Es un test de hipótesis sobre la lógica de salida, no una recomendación operativa todavía.
+
 **Comprueba el GMT offset de tu broker** (la hora del panel del EA muestra la hora del servidor) y ajusta los inputs de horario si difiere. Recuerda también que EE.UU. y Europa cambian al horario de verano en fechas distintas (≈2 semanas en marzo y 1 en octubre/noviembre): revisa los horarios en esos periodos.
 
 ---

@@ -81,6 +81,7 @@ input double   InpTrailingATRMult    = 1.0;        // Distancia del Trailing = A
 input int      InpTrailingPasoMin    = 20;         // Paso mínimo en puntos para mover el SL (evita spam al servidor)
 
 input group "=== 5. HORARIO (¡HORA DEL SERVIDOR DEL BROKER!) ==="
+input bool     InpCerrarFinDia       = true;       // Cierre forzado diario (sin overnight). false = dejar correr ganadores
 input int      InpHoraInicio         = 17;         // Hora de inicio de entradas (servidor)
 input int      InpMinutoInicio       = 0;          // Minuto de inicio de entradas
 input int      InpHoraFin            = 23;         // Hora de fin de entradas (servidor)
@@ -245,7 +246,8 @@ void OnTick()
    //    ticks para ejecutarlo), la cerramos en el PRIMER tick disponible.
    //    Garantiza el principio de "cero exposición nocturna" incluso en
    //    símbolos con sesión corta (acciones, índices con pausas).
-   CerrarPosicionesDeDiasAnteriores();
+   if(InpCerrarFinDia)
+      CerrarPosicionesDeDiasAnteriores();
 
    //--- 2. Gestión de la posición abierta (Breakeven y Trailing).
    //    Se ejecuta TICK A TICK porque proteger beneficios no admite esperas,
@@ -254,7 +256,9 @@ void OnTick()
 
    //--- 3. Cierre forzado diario: cero exposición nocturna.
    //    Se comprueba en cada tick para reaccionar al minuto exacto.
-   if(EsHoraDeCierreForzado())
+   //    Si InpCerrarFinDia=false, se permite overnight (los ganadores
+   //    pueden correr varios días hasta el TP). Reintroduce riesgo de gap.
+   if(InpCerrarFinDia && EsHoraDeCierreForzado())
      {
       CerrarTodasLasPosiciones("Cierre forzado diario (fin de sesión)");
       return; // Tras la hora de cierre no se evalúa nada más
@@ -985,7 +989,8 @@ bool EsHorarioOperativo()
    //    que el mercado cierra antes de poder ejecutar el cierre forzado
    //    (sin ticks no hay OnTick => la posición quedaría abierta toda la noche).
    //    Se usa el cierre EFECTIVO (acotado por el fin de sesión del símbolo).
-   if(minuto_actual >= MinutoCierreEfectivo() - InpMinutosSinEntradas)
+   //    Solo aplica si el cierre forzado diario está activo.
+   if(InpCerrarFinDia && minuto_actual >= MinutoCierreEfectivo() - InpMinutosSinEntradas)
       return(false);
 
    return(minuto_actual >= minuto_inicio && minuto_actual <= minuto_fin);
@@ -1156,7 +1161,7 @@ void ActualizarPanel(const MqlTick &tick)
    string estado;
    if(g_killswitch_activo)
       estado = "DETENIDO (Kill Switch: pérdida diaria máxima alcanzada)";
-   else if(EsHoraDeCierreForzado())
+   else if(InpCerrarFinDia && EsHoraDeCierreForzado())
       estado = "FUERA DE SESIÓN (tras cierre forzado diario)";
    else if(!EsHorarioOperativo())
       estado = "EN ESPERA (fuera del horario de entradas)";
