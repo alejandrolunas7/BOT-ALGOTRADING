@@ -1,12 +1,47 @@
-# BOT-ALGOTRADING — Nasdaq Momentum Pullback (MQL5)
+# BOT-ALGOTRADING — Estrategias algorítmicas para NASDAQ (MQL5)
 
-Expert Advisor para MetaTrader 5 que opera el **NASDAQ (NAS100 / USTEC / US100, según tu broker)** en **M15** con una estrategia de **seguimiento de tendencia con entrada en pullback**, durante la sesión de Nueva York.
+Este repositorio contiene dos Expert Advisors para MetaTrader 5 sobre el **NASDAQ (NAS100 / USTEC / US100)** y un registro honesto del proceso de investigación cuantitativa que los produjo.
 
-> Archivo principal: [`MQL5/Experts/NasdaqMomentumPullback.mq5`](MQL5/Experts/NasdaqMomentumPullback.mq5)
+| EA | Concepto | Timeframe | Estado |
+|---|---|---|---|
+| [`NasdaqMeanReversion.mq5`](MQL5/Experts/NasdaqMeanReversion.mq5) | **Reversión a la media (RSI-2)** — compra sobreventa extrema en tendencia alcista | Diario (D1) | **Activo** — pendiente de validación |
+| [`NasdaqMomentumPullback.mq5`](MQL5/Experts/NasdaqMomentumPullback.mq5) | Seguimiento de tendencia con pullback (EMA200 + MACD/ADX) | M15 | Archivado — sin edge demostrable (ver abajo) |
 
 ---
 
-## 1. Resumen de la estrategia
+## A. NasdaqMeanReversion — estrategia activa
+
+**Idea:** en un índice con deriva alcista de fondo, las caídas bruscas de corto plazo tienden a revertir. En vez de seguir la tendencia (comprar fuerza), compramos la **sobreventa extrema** y salimos cuando el precio recupera su media corta. Es de las pocas ineficiencias con respaldo estadístico documentado en índices (estilo Larry Connors / RSI-2). Se opera en **Diario y solo largos**, donde la reversión a la media tiene más fundamento.
+
+| Bloque | Regla |
+|---|---|
+| Filtro de tendencia | Cierre `[1]` > MA(200) — solo deriva alcista |
+| Entrada | RSI(2) `[1]` < 10 (sobreventa extrema) |
+| Salida (señal) | Cierre > MA(5) y/o RSI(2) > 70 (reversión completada) |
+| Stop protector | 2.5 × ATR(14) en el servidor (amplio, swing) |
+| Stop temporal | Máximo 10 velas en la operación |
+| Lotaje | Dinámico: 1% de la Equity según la distancia del stop |
+| Exposición | 1 posición máxima; **swing, con overnight** (el riesgo de gap se gestiona por tamaño y stop) |
+
+**Instalación y test:** cárgalo en un gráfico **Diario** de USTEC. Backtest en Strategy Tester (en Diario el modelado "Por precios de apertura" basta y es instantáneo). Como en cualquier estrategia, valídala con **forward testing** antes de creer en ella. Parámetros optimizables sugeridos: `InpRSIEntrada` (5–15), `InpPeriodoMASalida` (3–10), `InpMultiplicadorSL` (2.0–4.0), `InpModoSalida` (0/1/2).
+
+> Pendiente: confirmar con backtest que el concepto tiene edge real antes de optimizar o pasar a demo.
+
+---
+
+## B. NasdaqMomentumPullback — archivado (registro del proceso)
+
+Estrategia de seguimiento de tendencia en M15. Tras una investigación exhaustiva (3 señales de entrada distintas + optimización con validación forward + aislamiento de la lógica de salida) se concluyó que **no tiene una ventaja estadística explotable** en NASDAQ M15:
+
+- **Señal MACD+EMA200:** de 114 combinaciones optimizadas, 52 rentables en 2023–2025 pero **0 en el periodo forward** 2025–2026. Edge dependiente del régimen, no repetible.
+- **Señal ADX + pullback a EMA:** −307 $ (PF 0.89) sobre 2023–2026.
+- **Hipótesis de exits** (dejar correr ganadores): refutada — empeoró a −528 $ (PF 0.85). Los exits estaban salvando el sistema, no amputándolo. El problema era la señal de entrada (winrate ~42%, una moneda al aire).
+
+Se conserva como referencia: su **motor de gestión de riesgo y ejecución** (lotaje dinámico, kill switch, protección de gaps, manejo de retcodes/requotes, OnTester) es sólido y fue la base reutilizada para el EA de reversión. La documentación detallada de sus parámetros sigue más abajo.
+
+---
+
+## Resumen de la estrategia (NasdaqMomentumPullback)
 
 Todas las señales se evalúan **estrictamente al cierre de vela M15** (vela `[1]`), nunca tick a tick.
 
